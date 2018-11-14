@@ -59,9 +59,9 @@ class StoryGenerationModel:
             word_embedding = tf.embedding_lookup(embed_var, stacked_sentences)
 
             # Pass through a multi layer LSTM to get event representation
-            rep_out, rep_state = self.make_multilayer_lstm(word_embedding, stacked_sent_lens,
-                                                           self.REPRESENTATION_DIM,
-                                                           self.REPRESENTATION_LAYERS)
+            rep_out, rep_state = self.make_multilayer_rnn(word_embedding, stacked_sent_lens,
+                                                          self.REPRESENTATION_DIM,
+                                                          self.REPRESENTATION_LAYERS)
 
             # Get event representations
             stacked_representations = tf.squeeze(rep_out[:, -1, :], axis=1)
@@ -72,9 +72,9 @@ class StoryGenerationModel:
         with tf.name_scope('next_event'):
         
             # Pass through a multi layer LSTM to get next event
-            next_out, next_state = self.make_multilayer_lstm(self.event_reps, self.num_sentences,
-                                                             self.REPRESENTATION_DIM,
-                                                             self.NEXT_EVENT_LAYERS)
+            next_out, next_state = self.make_multilayer_rnn(self.event_reps, self.num_sentences,
+                                                            self.REPRESENTATION_DIM,
+                                                            self.NEXT_EVENT_LAYERS)
 
             # Get next event
             self.next_event = next_out[:, -1, :]
@@ -104,14 +104,19 @@ class StoryGenerationModel:
                 self.modi_loss = self.make_target_loss(stacked_all_events, stacked_modi_target,
                                                        self.MODI_VOCAB)
 
+
+        # TODO: Hierarchical attention
+
         # Sentence prediction module
         with tf.name_scope('sentence_prediction'):
 
             # Pass through a multi layer LSTM to predict word
             sent_input = self.current_sentence[:,:-1]
-            sent_out, sent_state = self.make_multilayer_lstm(sent_input, self.curr_sent_lengths,
-                                                             self.RNN_HIDDEN_DIM,
-                                                             self.RNN_HIDDEN_LAYERS)
+            sent_predict_init = tf.layers.dense(self.next_event, self.RNN_HIDDEN_DIM)
+            sent_out, sent_state = self.make_multilayer_rnn(sent_input, self.curr_sent_lengths,
+                                                            self.RNN_HIDDEN_DIM,
+                                                            self.RNN_HIDDEN_LAYERS,
+                                                            init_state=sent_predict_init)
 
             # Get loss on next word predictions
             stacked_sent_pred = tf.reshape(sent_out, [-1, self.RNN_HIDDEN_DIM])
@@ -139,14 +144,22 @@ class StoryGenerationModel:
             self.merged = tf.summary.merge_all()
 
         # Initialize all variables
-        self.sess.run(tf.global_variables_initializer()
+        self.sess.run(tf.global_variables_initializer())
 
 
-    def make_multilayer_lstm(self, seq_input, seq_len, hid_dim, num_layers):
-        lstm_cell = tf.nn.rnn_cell.BasicLSTMCell(hid_dim)
-        cell = tf.nn.rnn_cell.MultiRNNCell([lstm_cell * num_layers])
+    def make_multilayer_rnn(self, seq_input, seq_len, hid_dim, num_layers, init_state=None):
+        batch_size = tf.shape(seq_input)[0]
+        gru = tf.nn.rnn_cell.GRUCell(hid_dim)
+        cell = tf.nn.rnn_cell.MultiRNNCell([gru] * num_layers)
+        if init_state is None:
+            init_state = tf.tile(tf.get_variable('rnn_0', shape=[1, hid_dim], dtype=tf.float32),
+                                 [batch_size, 1])
+        init_states = [init_state]
+        for i in range(1, num_layers):
+            var = tf.get_variable('rnn_%d' % i, shape=[1, hid_dim], dtype=tf.float32)
+            init_states.append(tf.tile(var, [batch_size, 1]))
         out, state = tf.nn.dynamic_rnn(next_cell, seq_input, dtype=tf.float32,
-                                       sequence_length=seq_len)
+                                       sequence_length=seq_len, initial_state=init_states)
         return out, state
 
 
